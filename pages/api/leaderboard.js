@@ -1,43 +1,30 @@
-const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-const LEADERBOARD_KEY = "perle:leaderboard";
+import { Redis } from "@upstash/redis";
+
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+
+const KEY = "perle:leaderboard";
 const TOP_N = 20;
 
-async function redis(commands) {
-  const res = await fetch(`${UPSTASH_URL}/pipeline`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${UPSTASH_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(commands),
-  });
-  if (!res.ok) throw new Error(`Upstash error: ${res.status}`);
-  return res.json();
-}
-
-async function redisCmd(...args) {
-  const res = await fetch(`${UPSTASH_URL}/${args.map(encodeURIComponent).join("/")}`, {
-    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-  });
-  if (!res.ok) throw new Error(`Upstash error: ${res.status}`);
-  return res.json();
-}
-
 export default async function handler(req, res) {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) {
+  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
     return res.status(500).json({ error: "Leaderboard not configured" });
   }
 
-  // GET — fetch top N + optional rank for a handle
+  // GET — fetch top N leaderboard + optional user rank
   if (req.method === "GET") {
     try {
       const { handle } = req.query;
 
-      // Get top 20 with scores
-      const topRes = await redisCmd("ZREVRANGE", LEADERBOARD_KEY, "0", String(TOP_N - 1), "WITHSCORES");
-      const raw = topRes.result || [];
+      // Get top entries with scores, highest first
+      const raw = await redis.zrange(KEY, 0, TOP_N - 1, {
+        rev: true,
+        withScores: true,
+      });
 
+      // raw is [member, score, member, score, ...]
       const entries = [];
       for (let i = 0; i < raw.length; i += 2) {
         entries.push({ handle: raw[i], points: parseInt(raw[i + 1], 10) });
@@ -46,16 +33,18 @@ export default async function handler(req, res) {
       let userRank = null;
       let userPoints = null;
       if (handle) {
-        const rankRes = await redisCmd("ZREVRANK", LEADERBOARD_KEY, handle);
-        const scoreRes = await redisCmd("ZSCORE", LEADERBOARD_KEY, handle);
-        if (rankRes.result !== null) {
-          userRank = rankRes.result + 1;
-          userPoints = parseInt(scoreRes.result || "0", 10);
+        const clean = handle.replace(/^@/, "").trim();
+        const rank = await redis.zrevrank(KEY, clean);
+        if (rank !== null) {
+          userRank = rank + 1;
+          const score = await redis.zscore(KEY, clean);
+          userPoints = parseInt(score || "0", 10);
         }
       }
 
       return res.status(200).json({ entries, userRank, userPoints });
     } catch (e) {
+      console.error("Leaderboard GET error:", e);
       return res.status(500).json({ error: e.message });
     }
   }
@@ -69,21 +58,23 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Missing handle or points" });
       }
 
-      const cleanHandle = handle.replace(/^@/, "").slice(0, 32).trim();
-      if (!cleanHandle) return res.status(400).json({ error: "Invalid handle" });
+      const clean = handle.replace(/^@/, "").slice(0, 32).trim();
+      if (!clean) return res.status(400).json({ error: "Invalid handle" });
 
-      // Increment score atomically
-      const incrRes = await redisCmd("ZINCRBY", LEADERBOARD_KEY, String(points), cleanHandle);
-      const newTotal = parseInt(incrRes.result || "0", 10);
+      const newTotal = await redis.zincrby(KEY, points, clean);
+      const rank = await redis.zrevrank(KEY, clean);
 
-      const rankRes = await redisCmd("ZREVRANK", LEADERBOARD_KEY, cleanHandle);
-      const rank = rankRes.result !== null ? rankRes.result + 1 : null;
-
-      return res.status(200).json({ handle: cleanHandle, points: newTotal, rank });
+      return res.status(200).json({
+        handle: clean,
+        points: parseInt(newTotal, 10),
+        rank: rank !== null ? rank + 1 : null,
+      });
     } catch (e) {
+      console.error("Leaderboard POST error:", e);
       return res.status(500).json({ error: e.message });
     }
   }
 
   return res.status(405).json({ error: "Method not allowed" });
-}
+      }
+  
