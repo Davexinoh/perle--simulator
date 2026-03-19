@@ -1,13 +1,17 @@
 async function callGemini(apiKey, system, user) {
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         system_instruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: { maxOutputTokens: 1000, temperature: 0.7 },
+        generationConfig: {
+          maxOutputTokens: 1000,
+          temperature: 0.7,
+          responseMimeType: "application/json",
+        },
       }),
     }
   );
@@ -20,18 +24,17 @@ async function callGemini(apiKey, system, user) {
   }
 
   const data = await response.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+  // Concatenate all parts in case model returns multiple
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  return parts.map((p) => p.text || "").join("");
 }
 
 function extractJSON(text) {
-  // Strip markdown fences
-  let clean = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-
-  // Find the outermost { } block
+  const clean = text.replace(/```json/gi, "").replace(/```/g, "").trim();
   const start = clean.indexOf("{");
   const end = clean.lastIndexOf("}");
-  if (start === -1 || end === -1) return null;
-
+  if (start === -1 || end === -1 || end < start) return null;
   return clean.slice(start, end + 1);
 }
 
@@ -50,34 +53,26 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "API key not configured" });
   }
 
-  // Force JSON-only output in the user prompt
   const enforcedUser = `${user}
 
-IMPORTANT: Your entire response must be a single valid JSON object. No explanations, no markdown, no code fences — just the raw JSON object starting with { and ending with }.`;
+CRITICAL: Respond with a single raw JSON object only. No markdown, no code fences, no explanation — just the JSON.`;
 
   try {
-    let text = await callGemini(apiKey, system, enforcedUser);
-    let jsonStr = extractJSON(text);
-
-    // Retry once if first attempt fails to extract
-    if (!jsonStr) {
-      text = await callGemini(apiKey, system, enforcedUser);
-      jsonStr = extractJSON(text);
-    }
+    const text = await callGemini(apiKey, system, enforcedUser);
+    const jsonStr = extractJSON(text);
 
     if (!jsonStr) {
-      return res.status(500).json({ error: "Could not extract a valid response. Please try again." });
+      return res.status(500).json({ error: "Could not parse AI response. Please try again." });
     }
 
     let parsed;
     try {
       parsed = JSON.parse(jsonStr);
     } catch {
-      // Last resort — try to fix common JSON issues
       try {
         parsed = JSON.parse(jsonStr.replace(/,\s*}/g, "}").replace(/,\s*]/g, "]"));
       } catch {
-        return res.status(500).json({ error: "Could not parse response. Please try again." });
+        return res.status(500).json({ error: "Could not parse AI response. Please try again." });
       }
     }
 
