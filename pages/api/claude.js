@@ -23,7 +23,11 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           system_instruction: { parts: [{ text: system }] },
           contents: [{ role: "user", parts: [{ text: user }] }],
-          generationConfig: { maxOutputTokens: 1000, temperature: 0.7 },
+          generationConfig: {
+            maxOutputTokens: 1000,
+            temperature: 0.7,
+            responseMimeType: "application/json",
+          },
         }),
       }
     );
@@ -39,17 +43,22 @@ export default async function handler(req, res) {
 
     const data = await response.json();
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    const clean = text.replace(/```json|```/g, "").trim();
+
+    // Aggressively extract JSON — handles markdown fences, leading/trailing text
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return res.status(500).json({ error: "Could not extract JSON from model response." });
+    }
 
     let parsed;
     try {
-      parsed = JSON.parse(clean);
+      parsed = JSON.parse(jsonMatch[0]);
     } catch {
-      return res.status(500).json({ error: "Failed to parse model response as JSON", raw: clean });
+      return res.status(500).json({ error: "Failed to parse model response. Please try again." });
     }
 
     return res.status(200).json(parsed);
   } catch (err) {
     return res.status(500).json({ error: err.message || "Unknown server error" });
   }
-}
+                                 }
